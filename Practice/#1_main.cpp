@@ -52,7 +52,6 @@ enum {
 } phase;
 
 
-
 /*******************************************************************************
  メインプログラムのmain()（必ず処理される関数）はここから
 *******************************************************************************/
@@ -63,76 +62,75 @@ int main()
     while(1) {
         read(); // センサ読み取りの関数(#2で書くよ)
         switch(phase) {
-        case SAFETY:
-            pc.printf("SAFETY\r\n");
-            break;
-        case READY:
-            pc.printf("READY\r\n");
-            if(flight_pin.read() == 1) phase = FLIGHT;
-            break;
-        case FLIGHT:
-            pc.printf("FLIGHT\r\n");
-            if(!launched) {
-                flight_timer.start();
-                launched = true;
-                burning = true;
-            }
-            if(flight_timer.read() > BURN_TIME) {
-                if(burning) {
-                    burning = false;
-                    peak_detection_ticker.attach(&peak_detection, 1/10.0f);
+            case SAFETY:
+                pc.printf("SAFETY\r\n");
+                break;
+            case READY:
+                pc.printf("READY\r\n");
+                if(flight_pin.read() == 1) phase = FLIGHT;
+                break;
+            case FLIGHT:
+                pc.printf("FLIGHT\r\n");
+                if(!launched) {
+                    flight_timer.start();
+                    launched = true;
+                    burning = true;
                 }
-            }
-            if(!burning && (apogee || (flight_timer.read() > T_APOGEE))) phase = SEP;
-            break;
-        case SEP1:
-            pc.printf("SEP1\r\n");
-            peak_detection_ticker.detach();
-            sep1 = 1;
-            sep2 = 0;
-            if(!first_separated){
-                sep_timer.start();
-                separated = true;
-            }
-            //現状では加熱時間が経過したと同時に二段目が動作
-            if(sep_timer.read() > T_HEATING){
-                sep1 = 0;
-                sep_timer.stop();
-                phase = REEFING;
-            }
-            break;
-        case SEP2:
-            pc.printf("SEP2\r\n");
-            relay = 1;
-            sep1 = 0;
-            sep2 = 1;
-            if(!second_separated){
-                sep2_timer.start();
-                second_separated = true;
-            }
-            if(sep2_timer.read() > T_HEATING){
+                if(flight_timer.read() > BURN_TIME) {
+                    if(burning) {
+                        burning = false;
+                        peak_detection_ticker.attach(&peak_detection, 1/10.0f);
+                    }
+                }
+                if(!burning && (apogee || (flight_timer.read() > T_APOGEE))) phase = SEP1;
+                break;
+            case SEP1:
+                pc.printf("SEP1\r\n");
+                peak_detection_ticker.detach();
+                sep1 = 1;
                 sep2 = 0;
-                sep2_timer.stop();
-                phase = RECOVERY;
-            }
-            break;
-        case RECOVERY:
-            pc.printf("RECOVERY\r\n");
-            if(!landed){
-                if((press_LPF > ground_press) || (flight_timer.read() > T_RELAY_OFF)){
-                    relay = 0;
-                    landed = true;
-                    flight_timer.stop();
+                if(!first_separated){
+                    sep_timer.start();
+                    first_separated = true;
                 }
-            }
-            break;
-        case EMERGENCY:
-            pc.printf("EMERGENCY...\r\n");
-            mission_timer.stop();
-            relay = 1;
-            sep1 = 0;
-            sep2 = 0;
-            break;
+                //現状では加熱時間が経過したと同時に二段目が動作
+                if(sep_timer.read() > T_HEATING){
+                    sep1 = 0;
+                    sep_timer.stop();
+                    phase = SEP2;
+                }
+                break;
+            case SEP2:
+                pc.printf("SEP2\r\n");
+                sep1 = 0;
+                sep2 = 1;
+                if(!second_separated){
+                    sep2_timer.start();
+                    second_separated = true;
+                }
+                if(sep2_timer.read() > T_HEATING){
+                    sep2 = 0;
+                    sep2_timer.stop();
+                    phase = RECOVERY;
+                }
+                break;
+            case RECOVERY:
+                pc.printf("RECOVERY\r\n");
+                if(!landed){
+                    if((press_LPF > ground_press) || (flight_timer.read() > T_RELAY_OFF)){
+                        relay = 0;
+                        landed = true;
+                        flight_timer.stop();
+                    }
+                }
+                break;
+            case EMERGENCY:
+                pc.printf("EMERGENCY...\r\n");
+                mission_timer.stop();
+                relay = 1;
+                sep1 = 0;
+                sep2 = 0;
+                break;
         }
     }
 }
