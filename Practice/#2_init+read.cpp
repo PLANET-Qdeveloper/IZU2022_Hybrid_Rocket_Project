@@ -49,6 +49,7 @@ void init()
     wait(0.5);
 
     es.attach(&command_handler);    //ES920LRと接続開始
+
     downlink_ticker.attach(&downlink, 1.0f/DOWNLINK_RATE);
     record_ticker.attach(&record, 1.0f/LOG_RATE);
 
@@ -71,6 +72,7 @@ void read()
 
     f_sd = (bool)fp;
     f_gps = (bool)fix;
+    
     lat   = gps.get_lat();
     lon   = gps.get_lon();
     sat   = gps.get_sat();
