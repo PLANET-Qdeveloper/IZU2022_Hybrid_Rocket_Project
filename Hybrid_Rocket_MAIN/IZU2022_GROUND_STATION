@@ -1,0 +1,140 @@
+#include "mbed.h"
+#include "PQ_ES920.h"
+
+// LSB
+#define ADXL375_LSB 0.049           // 49mG
+#define INA226_VOLTAGE_LSB 1.25     // 1.25mV
+#define INA226_CURRENT_LSB 1.25     // 1.25mA
+#define LPS22HB_PRESS_LSB 0.0002441 // 1/4096.0hPa
+#define LPS22HB_TEMP_LSB 0.02       // 0.01℃
+#define MPU9250_ACCEL_LSB 0.0000610 // 0.061mG
+#define MPU9250_GYRO_LSB 0.00763    // 0.00763dps
+
+Serial pc(USBTX, USBRX, 115200);
+Serial es_serial(PA_9, PA_10, 115200);
+
+ES920 es(es_serial);
+
+char command[1];
+char* phase_names[] =  {"SAFETY", "READY", "FLIGHT", "SEP1", "SEP2", "EMERGENCY", "RECOVERY"};
+
+void downlink_handler(char* data);
+
+int main()
+{
+    pc.printf("IZU2022 GROUND STATION!!!\r\n");
+    es.attach(downlink_handler);
+
+    while(1) {
+        if(pc.readable()) {
+            command[0] = pc.getc() + 0x80;  //pc.getc(char)
+            es.send(command, 1);    //NAME.send(char *data, int size)
+            pc.printf("send:%02x\r\n", command[0]);    //0を左に2つ付加。%xは整数を16進数として入力。
+        }
+    }
+}
+
+void downlink_handler(char *data)
+{  
+    short mission_time_bits = *(short*)&data[0];
+    short flight_time_bits  = *(short*)&data[2];
+    char phase = data[4];
+    char apogee     = data[5] >> 7 & 1;
+    char landed     = data[5] >> 6 & 1;
+    char flight_pin = data[5] >> 5 & 1;
+    char relay      = data[5] >> 4 & 1;
+    char sep1       = data[5] >> 3 & 1;
+    char sep2       = data[5] >> 2 & 1;
+    char SEP2_NG    = data[5] >> 1 & 1;
+    //char            = data[5] >> 0 & 1;
+    
+    char f_sd       = data[6] >> 7 & 1;
+    char f_gps      = data[6] >> 6 & 1;
+    char f_ina_in   = data[6] >> 5 & 1;
+    char f_ina_ex   = data[6] >> 4 & 1;
+    char f_mpu      = data[6] >> 3 & 1;
+    char f_adxl     = data[6] >> 2 & 1;
+    char f_lps      = data[6] >> 1 & 1;
+    //char    = data[6] >> 0 & 1;
+    
+    int lat_bits = *((int*)&data[8]);
+    int lon_bits = *((int*)&data[12]);
+    int alt_bits = *((int*)&data[16]);
+    
+    short voltage_in_bits = (short)(data[20] | data[21] << 8);
+    short current_in_bits = (short)(data[22] | data[23] << 8);
+    short voltage_ex_bits = (short)(data[24] | data[25] << 8);
+    short current_ex_bits = (short)(data[26] | data[27] << 8);
+    
+    short press_bits = (short)(data[28] | data[29] << 8);
+    short temp_bits  = (short)(data[30] | data[31] << 8);
+    
+    short high_accel_bits[3];
+    high_accel_bits[0] = *(short*)&data[32];
+    high_accel_bits[1] = (short)(data[34] | data[35] << 8);
+    high_accel_bits[2] = (short)(data[36] | data[37] << 8);
+
+    short accel_bits[3];
+    accel_bits[0] = (short)(data[38] | data[39] << 8);
+    accel_bits[1] = (short)(data[40] | data[41] << 8);
+    accel_bits[2] = (short)(data[42] | data[43] << 8);
+    
+    short gyro_bits[3];
+    gyro_bits[0] = (short)(data[44] | data[45] << 8);
+    gyro_bits[1] = (short)(data[46] | data[47] << 8);
+    gyro_bits[2] = (short)(data[48] | data[49] << 8);
+    
+    int mission_time = (int)mission_time_bits;
+    int flight_time = (int)flight_time_bits;
+    
+    float lat = *((float*)&lat_bits);
+    float lon = *((float*)&lon_bits);
+    float alt = *((float*)&alt_bits);
+    
+    float voltage_in = (float)(voltage_in_bits * INA226_VOLTAGE_LSB);
+    float current_in = (float)(current_in_bits * INA226_CURRENT_LSB);
+    float voltage_ex = (float)(voltage_ex_bits * INA226_VOLTAGE_LSB);
+    float current_ex = (float)(current_ex_bits * INA226_CURRENT_LSB);
+    
+    float press = (float)(press_bits * LPS22HB_PRESS_LSB);
+    float temp = (float)(temp_bits * LPS22HB_TEMP_LSB);
+    
+    float high_accel[3];
+    for(int i = 0; i < 3; i++) {
+        high_accel[i] = high_accel_bits[i] * (ADXL375_LSB * 8);
+    }
+
+    float accel[3];
+    for(int i = 0; i < 3; i++) {
+        accel[i] = accel_bits[i] * (MPU9250_ACCEL_LSB * 8);
+    }
+    
+    float gyro[3];
+    for(int i = 0; i < 3; i++) {
+        gyro[i] = gyro_bits[i] * (MPU9250_GYRO_LSB * 8);
+    }
+    
+    pc.printf(" PLANET-Q GROUND STATION\r\n");
+    pc.printf(" 0  : SAFETY\t\t4  : SEP2\r\n");
+    pc.printf(" 1  : READY\t\t5  : EMERGENCY\r\n");
+    pc.printf(" 2  : FLIGHT\t\t6  : RECOVERY\r\n");
+    pc.printf(" 3  : SEP1\t\tDEL: System reset\r\n");
+    pc.printf(" r  : CANCEL SEP2\r\n");
+    pc.printf("\r\n");
+    pc.printf(" MISSION TIME: %d[s]\tFLIGHT TIME: %d[s]\r\n", mission_time, flight_time);
+    pc.printf(" F_Pin  SEP1  SEP2  APOGEE  RELAY  LANDED\r\n");
+    pc.printf(" %d      %d     %d     %d       %d      %d\r\n", flight_pin, sep1, sep2, apogee, relay, landed);
+    pc.printf(" SD  GPS  INA_IN  INA_EX  LPS  NG  MPU\r\n");
+    pc.printf(" %d   %d    %d       %d       %d    %d     %d\r\n", f_sd, f_gps, f_ina_in, f_ina_ex, f_mpu, f_lps, SEP2_NG);
+    pc.printf("\r\n");
+    pc.printf(" PHASE:\t%s\r\n", phase_names[phase]);
+    pc.printf("\r\n");
+    pc.printf(" Lat:\t%.5f\r\n", lat);
+    pc.printf(" Lon:\t%.5f\r\n", lon);
+    pc.printf(" Alt:\t%.1f[m]\r\n", alt);
+    pc.printf(" IN: %.2f[V]\t%.0f[mA]\r\n", (voltage_in / 1000.0f), current_in);
+    pc.printf(" EX: %.2f[V]\t%.0f[mA]\r\n", (voltage_ex / 1000.0f), current_ex);
+    pc.printf(" PRESS: %.2f [hPa]\tTEMPERATURE: %.2f [C]\r\n", press, temp);
+    pc.printf(" HIGH ACCEL(x,y,z): %.2f, %.2f, %.2f [G]\r\n", high_accel[0], high_accel[1], high_accel[2]);
+    pc.printf(" ACCEL(x,y,z): %.2f, %.2f, %.2f [G]\r\n", accel[0], accel[1], accel[2]);
+}
