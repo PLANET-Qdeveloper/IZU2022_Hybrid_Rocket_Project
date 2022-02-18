@@ -29,9 +29,10 @@
 #define CURRENT_LSB 1.0986328125
 #define PRESS_LSB   0.0384521484375
 #define TEMP_LSB    0.002593994140625
+#define ADXL375_LSB 0.049           // 49mG
 #define ACCEL_LSB   0.00048828125
 #define GYRO_LSB    0.06103515625
-#define MAG_LSB     0.146484375
+//#define MPU9250_MAG_LSB     0.146484375
 
 /*******************************************************************************
  関数のプロトタイプ宣言. main()より後で使うので予め宣言する.
@@ -57,7 +58,7 @@ I2C i2c(p28, p27);  //SDA, SCL
 ES920 es(es_serial);
 GPS gps(gps_serial);
 
-SDFileSystem sd(p5, p6, p7, p8, "sd");  //MOSI,MISO,SCK,CS
+//SDFileSystem sd(p5, p6, p7, p8, "sd");  //MOSI,MISO,SCK,CS
 EEPROM eeprom(i2c); // 24FC1025*4個（0x000000~0x07FFFF）
 ADXL375 adxl(i2c, ADXL375::ALT_ADDRESS_HIGH); // 3軸高加速度
 LPS22HB lps(i2c, LPS22HB::SA0_HIGH); // 気圧，温度
@@ -197,7 +198,10 @@ int main() {
                     sep2_timer.start();
                     second_separated = true;
                 }
-                if(SEP2_NG) sep2 = 0;
+                if(SEP2_NG){
+                    sep2 = 0;
+                    phase = RECOVERY;
+                }
                 if(sep2_timer.read_ms() > T_HEATING){
                     sep2 = 0;
                     sep2_timer.stop();
@@ -227,11 +231,12 @@ void init(){
     relay = 1;
     wait(0.5);
 
-    es.attach(&command_handler);    //ES920LRと接続開始
+    es.attach(command_handler);    //ES920LRと接続開始
     downlink_ticker.attach(&downlink, 1.0f);
-    record_ticker.attach(&record, 0.01f);
+    //record_ticker.attach(&record, 0.01f);
     print_ticker.attach(&print, 0.5f);
 
+    /*
     char file_name_format[] = "/sd/IZU2022_AVIONICS_%d.dat";
     int file_number = 1;
     while(1) {
@@ -268,7 +273,8 @@ void init(){
         fprintf(fp, "gyro_x,gyro_y,gyro_z,");
         fprintf(fp, "\r\n");
     }
-
+    */
+    
     ina_in.begin();
     ina_ex.begin();
     adxl.begin();
@@ -293,7 +299,7 @@ void read(){
     mission_time = mission_timer.read() + mission_timer_reset*30*60;
     flight_time  = flight_timer.read();
 
-    f_sd = (bool)fp;
+    //f_sd = (bool)fp;
     f_gps = (bool)fix;
     
     lat   = gps.get_lat();
@@ -375,7 +381,7 @@ void print(){
     pc.printf("Apogee:%d\r\n", apogee);
 };
 
-
+/*
 void record(){
     // EEPROM
     if((phase >= FLIGHT) && !landed) {
@@ -514,29 +520,6 @@ void record(){
         eeprom.write(addr, data, 128);
         addr += 0x80;
     }
-    
-    /*  カラム名
-    if(fp) {
-        fprintf(fp, "mission_time,");
-        fprintf(fp, "flight_time,");
-        fprintf(fp, "phase,");
-        fprintf(fp, "relay,");
-        fprintf(fp, "sep1,");
-        fprintf(fp, "sep2,");
-        fprintf(fp, "apogee,");
-        fprintf(fp, "first_separated,");
-        fprintf(fp, "second_separated,");
-        fprintf(fp, "landed,");
-        fprintf(fp, "f_sd,f_gps,f_adxl,f_ina_in,f_ina_ex,f_lps,f_mpu,");
-        fprintf(fp, "voltage_in,current_in,voltage_ex,current_ex,");
-        fprintf(fp, "lat,lon,sat,fix,hdop,alt,geoid,");
-        fprintf(fp, "press,press_LPF,temp,");
-        fprintf(fp, "high_accel_x,high_accel_y,high_accel_z,");
-        fprintf(fp, "accel_x,accel_y,accel_z,");
-        fprintf(fp, "gyro_x,gyro_y,gyro_z,");
-        fprintf(fp, "\r\n");
-    }
-    */
 
     if(fp) {
         fprintf(fp, "%.3f,%.3f,%s,", mission_time, flight_time, phase_names[phase]);
@@ -559,6 +542,7 @@ void record(){
         }
     }
 }
+*/
 
 void downlink(){
     short mission_time_bits = (short)mission_time;   //int -> short型：2バイト
@@ -584,13 +568,13 @@ void downlink(){
     flags2 |= f_lps     << 1;
     flags2 |= 0         << 0;
 
-    short voltage_in_bits = (short)(voltage_in / INA226_VOLTAGE_LSB);
-    short current_in_bits = (short)(current_in / INA226_CURRENT_LSB);
-    short voltage_ex_bits = (short)(voltage_ex / INA226_VOLTAGE_LSB);
-    short current_ex_bits = (short)(current_ex / INA226_CURRENT_LSB);
+    short voltage_in_bits = (short)(voltage_in / VOLTAGE_LSB);
+    short current_in_bits = (short)(current_in / CURRENT_LSB);
+    short voltage_ex_bits = (short)(voltage_ex / VOLTAGE_LSB);
+    short current_ex_bits = (short)(current_ex / CURRENT_LSB);
 
-    int press_bits = (int)(press_LPF * LPS22HB_PRESS_LSB);
-    short temp_bits = (short)(temperature / LPS22HB_TEMP_LSB);
+    short press_bits = (short)(press_LPF * PRESS_LSB);
+    short temp_bits = (short)(temperature / TEMP_LSB);
 
     short high_accel_bits[3];
     for(int i = 0; i < 3; i++) {
@@ -599,15 +583,16 @@ void downlink(){
 
     short accel_bits[3];
     for(int i = 0; i < 3; i++) {
-        accel_bits[i] = (short)(accel[i] / MPU9250_ACCEL_LSB * 8);
+        accel_bits[i] = (short)(accel[i] / ACCEL_LSB * 8);
     }
 
     short gyro_bits[3];
     for(int i = 0; i < 3; i++) {
-        gyro_bits[i] = (short)(gyro[i] / MPU9250_GYRO_LSB * 8);
+        gyro_bits[i] = (short)(gyro[i] / GYRO_LSB * 8);
     }
 
     char data[50];  //サイズ50の配列を用意. 1箱：1バイト.ポインタ型変数：4バイト. char型:1バイト
+    //data[1] = mission_timer_reset;
     data[0]  = ((char*)&mission_time_bits)[0];
     data[1]  = ((char*)&mission_time_bits)[1];
     data[2]  = ((char*)&flight_time_bits)[0];
