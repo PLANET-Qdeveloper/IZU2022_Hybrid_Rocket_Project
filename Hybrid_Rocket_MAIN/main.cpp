@@ -3,7 +3,6 @@
 ***************************************************/
 #include <mbed.h>
 #include <stdio.h>
-#include <errno.h>
 
 #include "SDFileSystem.h"
 #include "PQ_GPS.h"
@@ -17,22 +16,11 @@
 /*******************************************************************************
  定数宣言
 *******************************************************************************/
-#define BURN_TIME       8000.0f       // エンジン燃焼時間[ms]
-#define T_APOGEE        2400000.0f    // FLIGHTからSEPまでの制限時間[ms]
-#define T_HEATING       6600.0f       // ニクロム線加熱時間[ms]
-#define T_RELAY_OFF     340000.0f     // FLIGHTからRECOVERYまでの時間[ms]
+#define BURN_TIME       2400.0f       // エンジン燃焼時間[ms]
+#define T_APOGEE        1000000.0f    // FLIGHTからSEPまでの制限時間[ms]
+#define T_HEATING       5170.0f       // ニクロム線加熱時間[ms]
+#define T_RELAY_OFF     50000.0f     // FLIGHTからRECOVERYまでの時間[ms]
 #define coef            0.1f
-
-// データ圧縮率
-#define TIME_LSB    54.931640625
-#define VOLTAGE_LSB 1.25
-#define CURRENT_LSB 1.0986328125
-#define PRESS_LSB   0.0384521484375
-#define TEMP_LSB    0.002593994140625
-#define ADXL375_LSB 0.049           // 49mG
-#define ACCEL_LSB   0.00048828125
-#define GYRO_LSB    0.06103515625
-//#define MPU9250_MAG_LSB     0.146484375
 
 /*******************************************************************************
  関数のプロトタイプ宣言. main()より後で使うので予め宣言する.
@@ -44,7 +32,7 @@ void peak_detection();
 void record();
 void downlink();
 void command_handler(char* command);
-void print();
+void buzzer();
 
 /*******************************************************************************
  プロトタイプ宣言
@@ -58,7 +46,7 @@ I2C i2c(p28, p27);  //SDA, SCL
 ES920 es(es_serial);
 GPS gps(gps_serial);
 
-//SDFileSystem sd(p5, p6, p7, p8, "sd");  //MOSI,MISO,SCK,CS
+SDFileSystem sd(p5, p6, p7, p8, "sd");  //MOSI,MISO,SCK,CS
 EEPROM eeprom(i2c); // 24FC1025*4個（0x000000~0x07FFFF）
 ADXL375 adxl(i2c, ADXL375::ALT_ADDRESS_HIGH); // 3軸高加速度
 LPS22HB lps(i2c, LPS22HB::SA0_HIGH); // 気圧，温度
@@ -76,12 +64,13 @@ Ticker downlink_ticker;
 Ticker record_ticker;
 Ticker smoothing_ticker;
 Ticker peak_detection_ticker;
-Ticker print_ticker;
+Ticker buzzer_ticker;
 
 DigitalIn flight_pin(p20);  // 離床検知用フライトピン
 DigitalOut sep1(p24);       // 1段目のニクロム線制御
 DigitalOut sep2(p25);       // 2段目のニクロム線制御
 DigitalOut relay(p26);      // リレーのオンオフ
+DigitalOut buzzer_pin(p21);
 
 /*******************************************************************************
  変数宣言
@@ -112,9 +101,11 @@ FILE *fp;
 
 int addr;   // EEPROMの書き込みアドレス
 
-int mission_timer_reset;  // mission_timerをリセットした回数
+char mission_timer_reset;  // mission_timerをリセットした回数
 int mission_time;         //電源投入からの経過時間
 int flight_time;          //離床検知からの経過時間
+
+int not_recovery = 1;
 
 //動作確認用のフラグ：1=有効, 0=無効
 char f_sd;      // SDカード
@@ -148,15 +139,14 @@ float press_LPF;
 float press_prev_LPF;
 float ground_press;
 
-
-int main() {
+int main()
+{
     init();
-    wait(1);
-    while(1) {
+    while(not_recovery) {
         read();
         switch(phase) {
             case SAFETY:
-                if((press_count == 9)&&(!initialized)){
+                if((press_count == 9)&&(!initialized)) {
                     smoothing_ticker.attach(&smoothing, 0.01f);
                     initialized = true;
                 }
@@ -181,39 +171,43 @@ int main() {
             case SEP1:
                 peak_detection_ticker.detach();
                 sep1 = 1;
-                if(!first_separated){
+                if(!first_separated) {
                     sep1_timer.start();
                     first_separated = true;
                 }
                 //現状では加熱時間が経過したと同時に二段目が動作
-                if(sep1_timer.read_ms() > T_HEATING){
+                if(sep1_timer.read_ms() > T_HEATING) {
                     sep1 = 0;
                     sep1_timer.stop();
                     phase = SEP2;
                 }
                 break;
             case SEP2:
-                if(!second_separated && !SEP2_NG){
+                if(!second_separated && !SEP2_NG) {
                     sep2 = 1;
                     sep2_timer.start();
                     second_separated = true;
                 }
-                if(SEP2_NG){
+                if(SEP2_NG) {
                     sep2 = 0;
                     phase = RECOVERY;
                 }
-                if(sep2_timer.read_ms() > T_HEATING){
+                if(sep2_timer.read_ms() > T_HEATING) {
                     sep2 = 0;
                     sep2_timer.stop();
                     phase = RECOVERY;
                 }
+
                 break;
             case RECOVERY:
-                if(!landed){
-                    if((press_LPF > ground_press) || (flight_timer.read() > T_RELAY_OFF)){
+                buzzer_ticker.attach(&buzzer, 10.0f);
+                if(!landed) {
+                    if((press_LPF > ground_press) || (flight_timer.read_ms() > T_RELAY_OFF)) {
                         relay = 0;
                         landed = true;
+                        mission_timer.stop();
                         flight_timer.stop();
+                        not_recovery = 0;
                     }
                 }
                 break;
@@ -226,17 +220,16 @@ int main() {
     }
 }
 
-void init(){
+void init()
+{
+    wait(0.5);
     mission_timer.start();
     relay = 1;
-    wait(0.5);
 
     es.attach(command_handler);    //ES920LRと接続開始
     downlink_ticker.attach(&downlink, 1.0f);
-    //record_ticker.attach(&record, 0.01f);
-    print_ticker.attach(&print, 0.5f);
+    record_ticker.attach(&record, 0.01f);
 
-    /*
     char file_name_format[] = "/sd/IZU2022_AVIONICS_%d.dat";
     int file_number = 1;
     while(1) {
@@ -267,21 +260,19 @@ void init(){
         fprintf(fp, "f_sd,f_gps,f_adxl,f_ina_in,f_ina_ex,f_lps,f_mpu,");
         fprintf(fp, "voltage_in,current_in,voltage_ex,current_ex,");
         fprintf(fp, "lat,lon,sat,fix,hdop,alt,geoid,");
-        fprintf(fp, "press,press_LPF,temp,");
+        fprintf(fp, "press,press_LPF,temperature,");
         fprintf(fp, "high_accel_x,high_accel_y,high_accel_z,");
         fprintf(fp, "accel_x,accel_y,accel_z,");
         fprintf(fp, "gyro_x,gyro_y,gyro_z,");
         fprintf(fp, "\r\n");
     }
-    */
-    
+
     ina_in.begin();
     ina_ex.begin();
     adxl.begin();
     mpu.begin();
     lps.begin();
 
-    wait(0.5);
     f_lps = lps.test();
     if(f_lps) {
         lps.read_press(&press);
@@ -290,7 +281,8 @@ void init(){
     }
 }
 
-void read(){
+void read()
+{
     //タイマーがオーバーフローしないために30分おきにリセット
     if(mission_timer.read() >= 30*60) {
         mission_timer.reset();
@@ -299,9 +291,9 @@ void read(){
     mission_time = mission_timer.read() + mission_timer_reset*30*60;
     flight_time  = flight_timer.read();
 
-    //f_sd = (bool)fp;
+    f_sd = (bool)fp;
     f_gps = (bool)fix;
-    
+
     lat   = gps.get_lat();
     lon   = gps.get_lon();
     sat   = gps.get_sat();
@@ -329,10 +321,10 @@ void read(){
     }
 
     f_adxl = adxl.test();
-        if(f_adxl) {
-            adxl.read(high_accel);
-        }
-    
+    if(f_adxl) {
+        adxl.read(high_accel);
+    }
+
     f_lps = lps.test();
     if(f_lps) {
         lps.read_press(&press);
@@ -345,7 +337,8 @@ void read(){
     }
 }
 
-void smoothing(){
+void smoothing()
+{
     // 配列のコピー
     float buf[10];
     for(int i = 0; i < 10; i++) {
@@ -367,27 +360,24 @@ void smoothing(){
     press_LPF = press_median * coef + press_prev_LPF * (1 - coef);
 }
 
-void peak_detection(){
-    if(press_prev_LPF < press_LPF){
+void peak_detection()
+{
+    if(press_prev_LPF < press_LPF) {
         detection_count++;
-    }else{
+    } else {
         detection_count = 0;
     }
     if(detection_count == 5) apogee = true;
 }
 
-void print(){
-    pc.printf("phase:%s, ", phase_names[phase]);
-    pc.printf("Apogee:%d\r\n", apogee);
-};
-
-/*
-void record(){
+void record()
+{
+    /*
     // EEPROM
     if((phase >= FLIGHT) && !landed) {
         //書き込みページサイズは1バイト(0-127)なのでchar型.
         // int:4バイト, float:4バイト, bool:1バイト
-        char data[128]; 
+        char data[128];
         data[0] = ((char*)&mission_time)[0];
         data[1] = ((char*)&mission_time)[1];
         data[2] = ((char*)&mission_time)[2];
@@ -520,12 +510,13 @@ void record(){
         eeprom.write(addr, data, 128);
         addr += 0x80;
     }
+    */
 
     if(fp) {
-        fprintf(fp, "%.3f,%.3f,%s,", mission_time, flight_time, phase_names[phase]);
+        fprintf(fp, "%d,%d,%s,", mission_time, flight_time, phase_names[phase]);
         fprintf(fp, "%d,%d,%d,%d,%d,%d,%d,", relay.read(), sep1.read(), sep2.read(), apogee, first_separated, second_separated, landed);
         fprintf(fp, "%d,%d,%d,%d,%d,%d,%d,", f_sd, f_gps, f_adxl, f_ina_in, f_ina_ex, f_lps, f_mpu);
-        fprintf(fp, "%f,%f,%f,%f,", voltage_in, current_in, voltage_ex, current_ex);
+        fprintf(fp, "%.3f,%.3f,%.3f,%.3f,", voltage_in, current_in, voltage_ex, current_ex);
         fprintf(fp, "%.6f,%.6f,%d,%d,%f,%f,%f,", lat, lon, sat, fix, hdop, alt, geoid);
         fprintf(fp, "%f,%f,%.2f,", press, press_LPF, temperature);
         fprintf(fp, "%f,%f,%f,", high_accel[0], high_accel[1], high_accel[2]);
@@ -533,21 +524,18 @@ void record(){
         fprintf(fp, "%f,%f,%f", gyro[0], gyro[1], gyro[2]);
         fprintf(fp, "\r\n");
     }
-    
-    if(sd_timer.read() >= 60*30){  //30分ごとにfcloseする
+
+    if(sd_timer.read() >= 60*30) { //30分ごとにfcloseする
         sd_timer.reset();
-        if(fp){
+        if(fp) {
             fclose(fp);
             fp = fopen(file_name, "a");
         }
     }
 }
-*/
 
-void downlink(){
-    short mission_time_bits = (short)mission_time;   //int -> short型：2バイト
-    short flight_time_bits = (short)flight_time;
-
+void downlink()
+{
     char flags1 = 0;
     flags1 |= (char)apogee      << 7;
     flags1 |= (char)landed      << 6;
@@ -556,7 +544,7 @@ void downlink(){
     flags1 |= sep1.read()       << 3;
     flags1 |= sep2.read()       << 2;
     flags1 |= (char)SEP2_NG     << 1;
-    flags1 |= 0                 << 0;
+    //flags1 |= (char)SEP2_NG     << 0;
 
     char flags2 = 0;
     flags2 |= f_sd      << 7;
@@ -566,88 +554,65 @@ void downlink(){
     flags2 |= f_mpu     << 3;
     flags2 |= f_adxl    << 2;
     flags2 |= f_lps     << 1;
-    flags2 |= 0         << 0;
+    //flags2 |= f_lps     << 0;
 
-    short voltage_in_bits = (short)(voltage_in / VOLTAGE_LSB);
-    short current_in_bits = (short)(current_in / CURRENT_LSB);
-    short voltage_ex_bits = (short)(voltage_ex / VOLTAGE_LSB);
-    short current_ex_bits = (short)(current_ex / CURRENT_LSB);
-
-    short press_bits = (short)(press_LPF * PRESS_LSB);
-    short temp_bits = (short)(temperature / TEMP_LSB);
-
-    short high_accel_bits[3];
-    for(int i = 0; i < 3; i++) {
-        high_accel_bits[i] = (short)(high_accel[i] / ADXL375_LSB * 8);
-    }
-
-    short accel_bits[3];
-    for(int i = 0; i < 3; i++) {
-        accel_bits[i] = (short)(accel[i] / ACCEL_LSB * 8);
-    }
-
-    short gyro_bits[3];
-    for(int i = 0; i < 3; i++) {
-        gyro_bits[i] = (short)(gyro[i] / GYRO_LSB * 8);
-    }
-
-    char data[50];  //サイズ50の配列を用意. 1箱：1バイト.ポインタ型変数：4バイト. char型:1バイト
-    //data[1] = mission_timer_reset;
-    data[0]  = ((char*)&mission_time_bits)[0];
-    data[1]  = ((char*)&mission_time_bits)[1];
-    data[2]  = ((char*)&flight_time_bits)[0];
-    data[3]  = ((char*)&flight_time_bits)[1];
-    data[4]  = phase;
-    data[5]  = flags1;
-    data[6]  = flags2;
-    data[7]  = 0;
-    data[8]  = ((char*)&lat)[0];
-    data[9]  = ((char*)&lat)[1];    
-    data[10] = ((char*)&lat)[2];
-    data[11] = ((char*)&lat)[3];
-    data[12] = ((char*)&lon)[0];
-    data[13] = ((char*)&lon)[1];   
-    data[14] = ((char*)&lon)[2];
-    data[15] = ((char*)&lon)[3];
-    data[16] = ((char*)&alt)[0];
-    data[17] = ((char*)&alt)[1];
-    data[18] = ((char*)&alt)[2];
-    data[19] = ((char*)&alt)[3];
-    data[20] = ((char*)&voltage_in_bits)[0];
-    data[21] = ((char*)&voltage_in_bits)[1];
-    data[22] = ((char*)&current_in_bits)[0];
-    data[23] = ((char*)&current_in_bits)[1];
-    data[24] = ((char*)&voltage_ex_bits)[0];
-    data[25] = ((char*)&voltage_ex_bits)[1];
-    data[26] = ((char*)&current_ex_bits)[0];
-    data[27] = ((char*)&current_ex_bits)[1];
-    data[28] = ((char*)&press_bits)[0];
-    data[29] = ((char*)&press_bits)[1];
-    data[30] = ((char*)&temp_bits)[0];
-    data[31] = ((char*)&temp_bits)[1];
-    data[32] = ((char*)&high_accel_bits[0])[0];
-    data[33] = ((char*)&high_accel_bits[0])[1];
-    data[34] = ((char*)&high_accel_bits[1])[0];
-    data[35] = ((char*)&high_accel_bits[1])[1];
-    data[36] = ((char*)&high_accel_bits[2])[0];
-    data[37] = ((char*)&high_accel_bits[2])[1];
-    data[38] = ((char*)&accel_bits[0])[0];
-    data[39] = ((char*)&accel_bits[0])[1];
-    data[40] = ((char*)&accel_bits[1])[0];
-    data[41] = ((char*)&accel_bits[1])[1];
-    data[42] = ((char*)&accel_bits[2])[0];
-    data[43] = ((char*)&accel_bits[2])[1];
-    data[44] = ((char*)&gyro_bits[0])[0];
-    data[45] = ((char*)&gyro_bits[0])[1];
-    data[46] = ((char*)&gyro_bits[1])[0];
-    data[47] = ((char*)&gyro_bits[1])[1];
-    data[48] = ((char*)&gyro_bits[2])[0];
-    data[49] = ((char*)&gyro_bits[2])[1];
+    float lat_1000 = lat*1000;
+    int lat_int = lat_1000;
+    float lon_1000 = lon*1000;
+    int lon_int = lon_1000;
+    float alt_1000 = alt*1000;
+    int alt_int = alt_1000;
+    
+    char data[50];  //サイズ44の配列を用意. 1箱：1バイト.ポインタ型変数：4バイト. char型:1バイト
+    data[0]  = ((char*)&mission_time)[0];
+    data[1]  = ((char*)&mission_time)[1];
+    data[2]  = ((char*)&mission_time)[2];
+    data[3]  = ((char*)&mission_time)[3];
+    data[4]  = ((char*)&flight_time)[0];
+    data[5]  = ((char*)&flight_time)[1];
+    data[6]  = ((char*)&flight_time)[2];
+    data[7]  = ((char*)&flight_time)[3];
+    data[8]  = phase;
+    data[9]  = flags1;
+    data[10] = flags2;
+    data[11] = ((char*)&lat_int)[0];
+    data[12] = ((char*)&lat_int)[1];
+    data[13] = ((char*)&lat_int)[2];
+    data[14] = ((char*)&lat_int)[3];
+    data[15] = ((char*)&lon_int)[0];
+    data[16] = ((char*)&lon_int)[1];
+    data[17] = ((char*)&lon_int)[2];
+    data[18] = ((char*)&lon_int)[3];
+    data[19] = ((char*)&alt_int)[0];
+    data[20] = ((char*)&alt_int)[1];
+    data[21] = ((char*)&alt_int)[2];
+    data[22] = ((char*)&alt_int)[3];
+    data[23] = ((char*)&voltage_in)[0];
+    data[24] = ((char*)&voltage_in)[1];
+    data[25] = ((char*)&voltage_in)[2];
+    data[26] = ((char*)&voltage_in)[3];
+    data[27] = ((char*)&current_in)[0];
+    data[28] = ((char*)&current_in)[1];
+    data[29] = ((char*)&current_in)[2];
+    data[30] = ((char*)&current_in)[3];
+    data[31] = ((char*)&voltage_ex)[0];
+    data[32] = ((char*)&voltage_ex)[1];
+    data[33] = ((char*)&voltage_ex)[2];
+    data[34] = ((char*)&voltage_ex)[3];
+    data[35] = ((char*)&current_ex)[0];
+    data[36] = ((char*)&current_ex)[1];
+    data[37] = ((char*)&current_ex)[2];
+    data[38] = ((char*)&current_ex)[3];
+    data[39] = ((char*)&press_LPF)[0];
+    data[40] = ((char*)&press_LPF)[1];
+    data[41] = ((char*)&press_LPF)[2];
+    data[42] = ((char*)&press_LPF)[3];
 
     es.send(data, 50);
 }
 
-void command_handler(char* command){
+void command_handler(char* command)
+{
     switch(command[0]) {
         case 0xB0:  //"0" READY --> SAFETY
             if(phase == READY) phase = SAFETY;
@@ -661,16 +626,24 @@ void command_handler(char* command){
         case 0xB3:  //"3" FLIGHT --> SEP1
             if(!burning && phase == FLIGHT) phase = SEP1;
             break;
-        case 0xB4:  //"4" FLIGHT or SEP1, SEP2 --> EMERGENCY
-            if(phase >= FLIGHT && phase <= SEP2) phase = EMERGENCY;
+        case 0xB4:  //"4" READY or FLIGHT, SEP1, SEP2 --> EMERGENCY
+            if(phase >= READY && phase <= SEP2) phase = EMERGENCY;
             break;
         case 0xB5:  //"5" Switch SEP2_NG
             if(phase >= READY && phase <= SEP1) SEP2_NG = true;
             break;
         case 0xB6:  //"6"
+            buzzer();
             break;
         case 0xFF:  //"DEL" Mbed RESET
             NVIC_SystemReset();
             break;
     }
+}
+
+void buzzer()
+{
+    buzzer_pin = 1;
+    wait(3);
+    buzzer_pin = 0;
 }
